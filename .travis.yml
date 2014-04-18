@@ -8,11 +8,11 @@ perl:
  - "5.18"
 
 install:
- - cpanm --notest Dist::Zilla Dist::Zilla::PluginBundle::Author::ALEXBIO Dist::Zilla::Plugin::OSPrereqs
+ - cpanm --notest Dist::Zilla Dist::Zilla::PluginBundle::Author::ALEXBIO Dist::Zilla::Plugin::OSPrereqs Pod::Coverage::TrustPod Math::Int64
  - dzil listdeps --missing | cpanm --notest
 
 script:
- - dzil test
+ - dzil smoke --release
 
 notifications:
   recipient:

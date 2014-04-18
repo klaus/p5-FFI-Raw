@@ -2,6 +2,10 @@
 #include "perl.h"
 #include "XSUB.h"
 
+#define NEED_sv_2pv_flags
+
+#include "ppport.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,13 +16,24 @@
 # include <stdint.h>
 #endif
 
-#include "perl_math_int64.h"
-#include "perl_math_int64.c"
+#ifdef _MSC_VER
+#include <stdlib.h>
+typedef __int64 int64_t;
+typedef unsigned __int64 uint64_t;
+#endif
 
-#ifdef _WIN32
+#include "math_int64/perl_math_int64.h"
+#include "math_int64/perl_math_int64.c"
+
+#if defined(_WIN32) || defined(__CYGWIN__)
 # include <windows.h>
+# include <psapi.h>
 #else
 # include <dlfcn.h>
+#endif
+
+#if defined(__CYGWIN__)
+# include <sys/cygwin.h>
 #endif
 
 typedef struct FFI_RAW {
@@ -43,6 +58,7 @@ typedef struct FFI_RAW_CALLBACK {
 	ffi_cif cif;
 	ffi_type *ret;
 	char ret_type;
+	void *ret_value;
 	ffi_type **args;
 	char *args_types;
 	unsigned int argc;
@@ -105,6 +121,31 @@ void *_ffi_raw_get_type(char type) {
 	break;								\
 }
 
+#if defined(__CYGWIN__)
+void *_ffi_raw_win32_load_library(const char *posix_path) {
+	void *lib;
+
+	ssize_t size;
+	char *win_path;
+
+	size = cygwin_conv_path(CCP_POSIX_TO_WIN_A | CCP_RELATIVE, posix_path, NULL, 0);
+	if (size < 0) return NULL;
+
+	Newx(win_path, size, char);
+	if (cygwin_conv_path(CCP_POSIX_TO_WIN_A | CCP_RELATIVE, posix_path, win_path, size)) {
+		Safefree(win_path);
+		return NULL;
+	}
+
+	lib = LoadLibrary(win_path);
+	Safefree(win_path);
+
+	return lib;
+}
+#elif defined(_WIN32)
+# define _ffi_raw_win32_load_library(fn) LoadLibrary(fn)
+#endif
+
 void _ffi_raw_cb_wrap(ffi_cif *cif, void *ret, void *args[], void *argp) {
 	dSP;
 
@@ -156,8 +197,37 @@ void _ffi_raw_cb_wrap(ffi_cif *cif, void *ret, void *args[], void *argp) {
 		case 'C': *(unsigned char *) ret = POPi; break;
 		case 'f': *(float *) ret = POPn; break;
 		case 'd': *(double *) ret = POPn; break;
-		case 's': Perl_croak(aTHX_ "Not supported");
-		case 'p': Perl_croak(aTHX_ "Not supported");
+		case 's': {
+			SV *value = POPs;
+
+			if (self -> ret_value != NULL)
+				Safefree(self -> ret_value);
+
+			if (SvOK(value))
+				*(char **) ret = savepv(SvPV_nolen(value));
+			else
+				*(char **) ret = NULL;
+
+			self -> ret_value = *(void **) ret;
+
+			break;
+		}
+		case 'p': {
+			SV *value = POPs;
+
+			if (!SvOK(value)) {
+				*(void **) ret = NULL;
+				break;
+			}
+
+			if (sv_derived_from(value, "FFI::Raw::Ptr") ||
+			    sv_derived_from(value, "FFI::Raw::Callback"))
+				value = SvRV(value);
+
+			*(void **) ret = INT_TO_PTR(value);
+
+			break;
+		}
 	}
 
 	PUTBACK;
@@ -177,50 +247,102 @@ new(class, library, function, ret_type, ...)
 	SV *function
 	SV *ret_type
 
-	INIT:
+	PREINIT:
 		char *error;
 		ffi_status status;
 
-		const char *library_name, *function_name;
-
 		FFI_Raw_t *ffi_raw;
+
+		const char *library_name, *function_name;
+#if defined(_WIN32) || defined(__CYGWIN__)
+		int n;
+		DWORD needed;
+
+		HANDLE process;
+		HMODULE mods[1024];
+		TCHAR mod_name[MAX_PATH];
+#endif
+
 	CODE:
 		Newx(ffi_raw, 1, FFI_Raw_t);
 
-		library_name  = SvPV_nolen(library);
+		if (SvOK(library))
+			library_name = SvPV_nolen(library);
+		else
+			library_name = NULL;
+
 		function_name = SvPV_nolen(function);
-#ifdef _WIN32
+#if defined(_WIN32) || defined(__CYGWIN__)
 		GetLastError();
 
-		ffi_raw -> handle = LoadLibrary(library_name);
+		if (library_name != NULL) {
+			ffi_raw -> handle = _ffi_raw_win32_load_library(library_name);
 
-		if (ffi_raw->handle == NULL)
-			Perl_croak(aTHX_ "library not found");
+			if (ffi_raw->handle == NULL)
+				Perl_croak(aTHX_ "Library not found");
 
-		/*if ((error = GetLastError()) != NULL)
-			Perl_croak(aTHX_ error);*/
+			/*if ((error = GetLastError()) != NULL)
+				Perl_croak(aTHX_ error);*/
 
-		ffi_raw -> fn = GetProcAddress(
-			ffi_raw -> handle, function_name
-		);
+			ffi_raw -> fn = GetProcAddress(
+				ffi_raw -> handle, function_name
+			);
 
-		if (ffi_raw -> fn == NULL)
-			Perl_croak(aTHX_ "function not found");
+			if (ffi_raw -> fn == NULL)
+				Perl_croak(aTHX_ "Function not found");
 
-		/*if ((error = GetLastError()) != NULL)
-			Perl_croak(aTHX_ error);*/
+			/*if ((error = GetLastError()) != NULL)
+				Perl_croak(aTHX_ error);*/
+		} else {
+			process = OpenProcess(
+				PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+				FALSE, GetCurrentProcessId()
+			);
+
+			if (process == NULL)
+				Perl_croak(aTHX_ "Process not found");
+
+			if (EnumProcessModules(
+				process, mods, sizeof(mods), &needed)
+			) {
+				for (n = 0; n < (needed/sizeof(HMODULE)); n++) {
+					if (GetModuleFileNameEx(
+						process, mods[n], mod_name,
+						sizeof(mod_name)/sizeof(TCHAR))
+					) {
+
+						ffi_raw -> handle = _ffi_raw_win32_load_library(mod_name);
+
+						if (ffi_raw -> handle == NULL)
+							continue;
+
+						ffi_raw -> fn = GetProcAddress(
+							ffi_raw -> handle, function_name
+						);
+
+						if (ffi_raw -> fn != NULL)
+							break;
+
+						FreeLibrary(ffi_raw -> handle);
+					}
+				}
+			}
+
+			if (ffi_raw -> fn == NULL)
+				Perl_croak(aTHX_ "Function not found");
+		}
 #else
 		dlerror();
 
 		ffi_raw -> handle = dlopen(library_name, RTLD_LAZY);
 
 		if ((error = dlerror()) != NULL)
-			Perl_croak(aTHX_ error);
+			Perl_croak(aTHX_ "%s", error);
 
 		ffi_raw -> fn = dlsym(ffi_raw -> handle, function_name);
 
 		if ((error = dlerror()) != NULL)
-			Perl_croak(aTHX_ error);
+			Perl_croak(aTHX_ "%s", error);
 #endif
 		INIT_FFI_CIF(ffi_raw, 4)
 
@@ -234,11 +356,12 @@ new_from_ptr(class, function, ret_type, ...)
 	SV *function
 	SV *ret_type
 
-	INIT:
+	PREINIT:
 		char *error;
 		ffi_status status;
 
 		FFI_Raw_t *ffi_raw;
+
 	CODE:
 		Newx(ffi_raw, 1, FFI_Raw_t);
 
@@ -251,21 +374,6 @@ new_from_ptr(class, function, ret_type, ...)
 
 	OUTPUT: RETVAL
 
-void
-DESTROY(self)
-	FFI_Raw_t *self
-
-	CODE:
-		if (self -> handle)
-#ifdef _WIN32
-		FreeLibrary(self -> handle);
-#else
-		dlclose(self -> handle);
-#endif
-		Safefree(self -> args_types);
-		Safefree(self -> args);
-		Safefree(self);
-
 #define FFI_SET_ARG(TYPE, FN) {			\
 	TYPE *val;				\
 	Newx(val, 1, TYPE);			\
@@ -274,21 +382,44 @@ DESTROY(self)
 	break;					\
 }
 
-#define FFI_CALL(TYPE, FN) {			\
-	TYPE result;				\
-	ffi_call(&self -> cif, self -> fn, &result, values);	\
-	output = FN(result);			\
+#if defined(__BYTE_ORDER) && __BYTE_ORDER == __BIG_ENDIAN
+# define FFI_CALL(TYPE, FN) {			\
+	void *result;				\
+	void *original;                         \
+	ffi_type *rtype = self -> ret;		\
+	Newx(result, 1, TYPE);			\
+	original = result;                      \
+	ffi_call(&self -> cif, self -> fn, result, values); \
+	if (rtype -> type != FFI_TYPE_FLOAT &&	\
+	    rtype -> type != FFI_TYPE_STRUCT &&	\
+	    rtype -> size < sizeof(ffi_arg))	\
+		result = (char *) result + sizeof(ffi_arg) - rtype -> size; \
+	output = FN(*(TYPE *) result);		\
+	Safefree(original);			\
 	break;					\
 }
+#else
+# define FFI_CALL(TYPE, FN) {			\
+	void *result;				\
+	ffi_type *rtype = self -> ret;		\
+	Newx(result, 1, TYPE);			\
+	ffi_call(&self -> cif, self -> fn, result, values); \
+	output = FN(*(TYPE *) result);		\
+	Safefree(result);			\
+	break;					\
+}
+#endif
 
 SV *
 call(self, ...)
 	FFI_Raw_t *self
 
-	INIT:
+	PREINIT:
 		int i;
+
 		SV *output;
 		void **values;
+
 	CODE:
 		if (self -> argc != (items - 1))
 			Perl_croak(aTHX_ "Wrong number of arguments");
@@ -305,11 +436,11 @@ call(self, ...)
 				case 'x': FFI_SET_ARG(long long int, SvI64)
 				case 'X': FFI_SET_ARG(unsigned long long int, SvU64)
 				case 'i': FFI_SET_ARG(int, SvIV)
-				case 'I': FFI_SET_ARG(int, SvUV)
+				case 'I': FFI_SET_ARG(unsigned int, SvUV)
 				case 'z': FFI_SET_ARG(short, SvIV)
-				case 'Z': FFI_SET_ARG(short, SvUV)
+				case 'Z': FFI_SET_ARG(unsigned short, SvUV)
 				case 'c': FFI_SET_ARG(char, SvIV)
-				case 'C': FFI_SET_ARG(int, SvUV)
+				case 'C': FFI_SET_ARG(unsigned char, SvUV)
 				case 'f': FFI_SET_ARG(float, SvNV)
 				case 'd': FFI_SET_ARG(double, SvNV)
 				case 's': {
@@ -326,27 +457,30 @@ call(self, ...)
 					values[i] = val;
 					break;
 				}
+
 				case 'p': {
 					void **val;
 
 					Newx(val, 1, void *);
 
-					if (sv_derived_from(
-						arg, "FFI::Raw::MemPtr"
-					)) {
-						arg = SvRV(arg);
-					}
-
-					if (sv_derived_from(
-						arg, "FFI::Raw::Callback"
-					)) {
-						FFI_Raw_Callback_t *cb =
-							INT_TO_PTR(SvRV(arg));
-						*val = cb -> fn;
-					} else if (SvOK(arg))
-						*val = INT_TO_PTR(arg);
-					else
+					if (!SvOK(arg))
 						*val = NULL;
+					else {
+						if (sv_derived_from(
+							arg, "FFI::Raw::Ptr"
+						)) {
+							arg = SvRV(arg);
+						}
+
+						if (sv_derived_from(
+							arg, "FFI::Raw::Callback"
+						)) {
+							FFI_Raw_Callback_t *cb =
+								INT_TO_PTR(SvRV(arg));
+							*val = cb -> fn;
+						} else
+							*val = INT_TO_PTR(arg);
+					}
 
 					values[i] = val;
 					break;
@@ -364,16 +498,17 @@ call(self, ...)
 				output = newSV(0);
 				break;
 			}
+
 			case 'l': FFI_CALL(long, newSViv)
 			case 'L': FFI_CALL(unsigned long, newSVuv)
 			case 'x': FFI_CALL(long long int, newSVi64)
 			case 'X': FFI_CALL(unsigned long long int, newSVu64)
 			case 'i': FFI_CALL(int, newSViv)
-			case 'I': FFI_CALL(int, newSVuv)
+			case 'I': FFI_CALL(unsigned int, newSVuv)
 			case 'z': FFI_CALL(short, newSViv)
-			case 'Z': FFI_CALL(short, newSVuv)
+			case 'Z': FFI_CALL(unsigned short, newSVuv)
 			case 'c': FFI_CALL(char, newSViv)
-			case 'C': FFI_CALL(char, newSVuv)
+			case 'C': FFI_CALL(unsigned char, newSVuv)
 			case 'f': FFI_CALL(float, newSVnv)
 			case 'd': FFI_CALL(double, newSVnv)
 			case 's': {
@@ -387,6 +522,7 @@ call(self, ...)
 				output = newSVpv(result, 0);
 				break;
 			}
+
 			case 'p': {
 				void *result;
 
@@ -411,6 +547,21 @@ call(self, ...)
 		RETVAL = output;
 
 	OUTPUT: RETVAL
+
+void
+DESTROY(self)
+	FFI_Raw_t *self
+
+	CODE:
+		if (self -> handle)
+#if defined(_WIN32) || defined(__CYGWIN__)
+		FreeLibrary(self -> handle);
+#else
+		dlclose(self -> handle);
+#endif
+		Safefree(self -> args_types);
+		Safefree(self -> args);
+		Safefree(self);
 
 INCLUDE: xs/MemPtr.xs
 INCLUDE: xs/Callback.xs

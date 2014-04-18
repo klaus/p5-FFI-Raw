@@ -4,6 +4,7 @@ use strict;
 use warnings;
 
 use Config;
+use FindBin ();
 use ExtUtils::CBuilder;
 use Text::ParseWords qw(shellwords);
 
@@ -14,7 +15,7 @@ sub compile {
 
 	my $obj_file = $b -> compile(
 		source => $src_file,
-		extra_compiler_flags => '-std=gnu99'
+		include_dirs => [$FindBin::Bin],
 	);
 
 	return $b -> link(objects => $obj_file)
@@ -23,9 +24,16 @@ sub compile {
 	$src_file =~ s/\.c$//;
 	$src_file =~ s/^.*(\/|\\)//;
 
-	my $lddlflags = $Config{lddlflags};
-	$lddlflags =~ s{\\}{/}g;
-	system $Config{cc}, shellwords($lddlflags), -o => "t/$src_file.dll", "-Wl,--export-all-symbols", $obj_file;
+	if ($Config{cc} !~ /cl(\.exe)?$/) {
+		my $lddlflags = $Config{lddlflags};
+		$lddlflags =~ s{\\}{/}g;
+
+		system $Config{cc}, shellwords($lddlflags), -o => "t/$src_file.dll", "-Wl,--export-all-symbols", $obj_file;
+	} else {
+		my @cmd = ($Config{cc}, $obj_file, "/link", "/dll", "/out:t/$src_file.dll");
+
+		system @cmd;
+	}
 
 	return "t/$src_file.dll";
 }

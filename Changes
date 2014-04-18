@@ -2,7 +2,49 @@ Revision history for FFI-Raw
 
 {{$NEXT}}
 
+0.30      2014-03-27 16:44:42+01:00 Europe/Rome
+
+ - Fix build on Windows (GH#45)
+
+0.29      2014-03-27 14:07:49+01:00 Europe/Rome
+
+ - Avoid warnings when using undef to mean NULL (GH#44) (thanks, @plicease!)
+ - Support returning pointers and strings from callbacks
+   (GH#42) (GH#43) (thanks, @plicease!)
+ - Update to libffi 3.1-rc1 (should hopefully fix a few build failures)
+
+0.28      2014-02-14 13:09:10 Europe/Rome
+
+ - Correctly handle unsigned values
+ - Correctly handle return values on big endian platforms (GH#38)
+ - Correctly handle absolute paths on Cygwin (GH#39) (thanks, @plicease!)
+
+0.27      2014-02-03 19:44:11 Europe/Rome
+
+ - Skip int64 tests if LLONG constants are not available
+   (GH#35) (thanks, @plicease!)
+ - Fix build on Cygwin64 (GH#37) (thanks, @plicease!)
+ - Use ExtUtil::PkgConfig, if available, to detect system libffi
+   (GH#36) (thanks, @plicease!)
+
+0.26      2014-02-01 17:22:03 Europe/Rome
+
+ - Import FFI::Raw::Ptr in FFI::Raw to avoid a bug in perl < 5.10.1
+   (GH#23) (thanks, @plicease!)
+ - Require perl >= 5.10
+ - Add boolean override for FFI::Raw objects (GH#28) (thanks, @calid!)
+ - Fix build on non-threaded perl (like OpenBSD's) (GH#29) (thanks, @plicease!)
+ - Use system libffi if available (GH#30) (GH#32) (thanks, @plicease!)
+ - Allow resolving functions in the main program (GH#33) (thanks, @plicease!)
+
+0.25      2014-01-23 11:52:49 Europe/Rome
+
  - Fix build under MSWin32 64-bit (GH#17) (thanks, @plicease!)
+ - Support explicit string length of 0 in MemPtr -> tostr()
+   (GH#18) (thanks, @klaus)
+ - Add FFI::Raw::Ptr base class for pointer objects
+   (GH#20) (GH#22) (thanks, @plicease!)
+ - Fix build under MS Visual C++ (GH#19) (thanks, @plicease!)
 
 0.24      2013-12-19 16:44:50 Europe/Rome
 
